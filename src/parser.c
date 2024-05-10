@@ -1,7 +1,7 @@
 /*
  * Rufus: The Reliable USB Formatting Utility
  * Elementary Unicode compliant find/replace parser
- * Copyright © 2012-2020 Pete Batard <pete@akeo.ie>
+ * Copyright © 2012-2024 Pete Batard <pete@akeo.ie>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -91,7 +91,7 @@ static loc_cmd* get_loc_cmd(char c, char* line) {
 			// locate ending quote
 			while ((line[i] != 0) && ((line[i] != '"') || ((line[i] == '"') && (line[i-1] == '\\')))) {
 				if ((line[i] == '"') && (line[i-1] == '\\')) {
-					strcpy(&line[i-1], &line[i]);
+					memmove(&line[i-1], &line[i], strlen(&line[i]) + 1);
 				} else {
 					i++;
 				}
@@ -796,13 +796,18 @@ char* set_token_data_file(const char* token, const char* data, const char* filen
 	}
 
 out:
-	if (fd_in != NULL) fclose(fd_in);
-	if (fd_out != NULL) fclose(fd_out);
+	if (fd_in != NULL) {
+		fclose(fd_in);
+		fd_in = NULL;
+	}
+	if (fd_out != NULL)
+		fclose(fd_out);
 
 	// If an insertion occurred, delete existing file and use the new one
 	if (ret != NULL) {
 		// We're in Windows text mode => Remove CRs if requested
-		fd_in = _wfopen(wtmpname, L"rb");
+		if (wtmpname != NULL)
+			fd_in = _wfopen(wtmpname, L"rb");
 		fd_out = _wfopen(wfilename, L"wb");
 		// Don't check fds
 		if ((fd_in != NULL) && (fd_out != NULL)) {
@@ -814,8 +819,10 @@ out:
 		} else {
 			uprintf("Could not write '%s' - original file has been left unmodified\n", filename);
 			ret = NULL;
-			if (fd_in != NULL) fclose(fd_in);
-			if (fd_out != NULL) fclose(fd_out);
+			if (fd_in != NULL)
+				fclose(fd_in);
+			if (fd_out != NULL)
+				fclose(fd_out);
 		}
 	}
 	if (wtmpname != NULL)
@@ -907,14 +914,13 @@ void parse_update(char* buf, size_t len)
 	char allowed_rtf_chars[] = "abcdefghijklmnopqrstuvwxyz|~-_:*'";
 	char allowed_std_chars[] = "\r\n ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!\"$%^&+=<>(){}[].,;#@/?";
 	char download_url_name[24];
-	char *arch_names[CPU_ARCH_MAX] = { "x86", "x64", "arm", "arm64", "none" };
 
 	// strchr includes the NUL terminator in the search, so take care of backslash before NUL
 	if ((buf == NULL) || (len < 2) || (len > 64 * KB) || (buf[len-1] != 0) || (buf[len-2] == '\\'))
 		return;
 	// Sanitize the data - Not a silver bullet, but it helps
 	len = safe_strlen(buf)+1;	// Someone may be inserting NULs
-	for (i=0; i<len-1; i++) {
+	for (i = 0; i < len - 1; i++) {
 		// Check for valid RTF sequences as well as allowed chars if not RTF
 		if (buf[i] == '\\') {
 			// NB: we have a zero terminator, so we can afford a +1 without overflow
@@ -926,25 +932,25 @@ void parse_update(char* buf, size_t len)
 		}
 	}
 
-	for (i=0; i<3; i++)
+	for (i = 0; i < 3; i++)
 		update.version[i] = 0;
 	update.platform_min[0] = 5;
 	update.platform_min[1] = 2;	// XP or later
 	safe_free(update.download_url);
 	safe_free(update.release_notes);
 	if ((data = get_sanitized_token_data_buffer("version", 1, buf, len)) != NULL) {
-		for (i=0; (i<3) && ((token = strtok((i==0)?data:NULL, ".")) != NULL); i++) {
+		for (i = 0; (i < 3) && ((token = strtok((i == 0) ? data : NULL, ".")) != NULL); i++) {
 			update.version[i] = (uint16_t)atoi(token);
 		}
 		safe_free(data);
 	}
 	if ((data = get_sanitized_token_data_buffer("platform_min", 1, buf, len)) != NULL) {
-		for (i=0; (i<2) && ((token = strtok((i==0)?data:NULL, ".")) != NULL); i++) {
+		for (i = 0; (i < 2) && ((token = strtok((i == 0) ? data : NULL, ".")) != NULL); i++) {
 			update.platform_min[i] = (uint32_t)atoi(token);
 		}
 		safe_free(data);
 	}
-	static_sprintf(download_url_name, "download_url_%s", arch_names[GetCpuArch()]);
+	static_sprintf(download_url_name, "download_url_%s", GetArchName(WindowsVersion.Arch));
 	update.download_url = get_sanitized_token_data_buffer(download_url_name, 1, buf, len);
 	if (update.download_url == NULL)
 		update.download_url = get_sanitized_token_data_buffer("download_url", 1, buf, len);
@@ -1052,7 +1058,7 @@ out:
 	if (fd_out != NULL) fclose(fd_out);
 
 	// If an insertion occurred, delete existing file and use the new one
-	if (ret != NULL) {
+	if (ret != NULL && wtmpname != NULL && wfilename != NULL) {
 		// We're in Windows text mode => Remove CRs if requested
 		fd_in = _wfopen(wtmpname, L"rb");
 		fd_out = _wfopen(wfilename, L"wb");
@@ -1187,8 +1193,10 @@ char* replace_in_token_data(const char* filename, const char* token, const char*
 
 		// Skip whitespaces after token (while making sure there's at least one)
 		ns = wcsspn(&buf[i], wspace);
-		if (ns == 0)
+		if (ns == 0) {
+			fputws(buf, fd_out);
 			continue;
+		}
 		i += ns;
 
 		// p[x] = starting position of the fragment with the replaceable string
@@ -1215,7 +1223,7 @@ char* replace_in_token_data(const char* filename, const char* token, const char*
 			// coverity[invalid_type]
 			fwprintf_s(fd_out, L"%s%s", &buf[p[j]], wrep);
 
-		// Ouput the last fragment
+		// Output the last fragment
 		// coverity[invalid_type]
 		fwprintf_s(fd_out, L"%s", &buf[p[j]]);
 
@@ -1227,7 +1235,7 @@ out:
 	if (fd_out != NULL) fclose(fd_out);
 
 	// If a replacement occurred, delete existing file and use the new one
-	if (ret != NULL) {
+	if (ret != NULL && wtmpname != NULL && wfilename != NULL) {
 		// We're in Windows text mode => Remove CRs if requested
 		fd_in = _wfopen(wtmpname, L"rb");
 		fd_out = _wfopen(wfilename, L"wb");
@@ -1333,7 +1341,7 @@ static BOOL get_data_from_asn1_internal(const uint8_t* buf, size_t buf_len, cons
 			}
 
 			if (len > buf_len - pos) {
-				uprintf("get_data_from_asn1: Overflow error (computed length %d is larger than remaining data)", len);
+				uprintf("get_data_from_asn1: Overflow error (computed length %zu is larger than remaining data)", len);
 				return FALSE;
 			}
 		}
@@ -1471,4 +1479,68 @@ void* get_data_from_asn1(const uint8_t* buf, size_t buf_len, const char* oid_str
 	get_data_from_asn1_internal(buf, buf_len, oid, oid_len, asn1_type, &data, data_len, &matched);
 	free(oid);
 	return data;
+}
+
+/*
+ * Sanitize an ISO volume label or GRUB version, so that we can use it for bootloader lookup.
+ * Note that this call modifies the string passed as parameter.
+ */
+int sanitize_label(char* label)
+{
+	// Notice: Do not add "-beta" to this list as we have existing GRUB lookups for
+	// "grub-2.02-beta2" and stuff...
+	static const char* remove[] = { "-i386", "-i686", "-amd64", "-x86-64", ".x86-64",
+		"-x64", "-armhf", "-arm64", "-aarch64", "-32-bit", "-64-bit", "-32bit", "-64bit",
+		"-intel", "-cd", "-dvd", "-standard", "-live", "-install", "-server", "-net",
+		"-desktop", "-lts", "-studio", "-baseos", "-kde", "-xfce", "-lxde", "-gnome",
+		"-mate", "-unstable", "-debug", "-release", "-final", "-stream", "-cinnamon",
+		"-cinn", "-leap", "-tumbleweed", "-budgie", "-ws", "-iot", "-ostree", ".iso"
+	};
+	size_t i, len;
+	char *s;
+
+	len = strlen(label);
+	for (i = 0; i < len; i++) {
+		char c = label[i];
+		// Convert to lowercase
+		if (c >= 'A' && c <= 'Z')
+			c += 0x20;
+		// Convert non alphanum (except '.') to dash
+		if ((c < '0' && c != '.') || (c > '9' && c < 'a') || (c > 'z'))
+			c = '-';
+		label[i] = c;
+	}
+
+	// Remove all leading '-'
+	for (i = 0; i < len && label[i] == '-'; i++);
+	if (i != 0)
+		memcpy(label, &label[i], len - i);
+	len = strlen(label);
+	if (len <= 1)
+		return -1;
+
+	// Remove all trailing '-'
+	for (i = len - 1; i > 0 && label[i] == '-'; i--)
+		label[i] = 0;
+	len = strlen(label);
+	if (len <= 1)
+		return -1;
+
+	// Remove all duplicate '-' (non-optimized!)
+	for (i = 0; len >= 2 && i < len - 2; i++) {
+		if (label[i] == '-' && label[i + 1] == '-') {
+			memcpy(&label[i + 1], &label[i + 2], len - i - 1);
+			len--;
+			i--;
+		}
+	}
+
+	// Remove specific substrings
+	for (i = 0; i < ARRAYSIZE(remove); i++) {
+		s = strstr(label, remove[i]);
+		if (s != NULL)
+			strcpy(s, &s[strlen(remove[i])]);
+	}
+
+	return 0;
 }

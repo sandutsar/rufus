@@ -1,7 +1,7 @@
 ﻿/*
  * Rufus: The Reliable USB Formatting Utility
  * Poedit <-> rufus.loc conversion utility
- * Copyright © 2018-2019 Pete Batard <pete@akeo.ie>
+ * Copyright © 2018-2023 Pete Batard <pete@akeo.ie>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -41,9 +41,9 @@ using System.Windows.Forms;
 [assembly: AssemblyDescription("Poedit ↔ Rufus loc conversion utility")]
 [assembly: AssemblyCompany("Akeo Consulting")]
 [assembly: AssemblyProduct("Pollock")]
-[assembly: AssemblyCopyright("Copyright © 2018 Pete Batard <pete@akeo.ie>")]
+[assembly: AssemblyCopyright("Copyright © 2018-2023 Pete Batard <pete@akeo.ie>")]
 [assembly: AssemblyTrademark("GNU GPLv3")]
-[assembly: AssemblyVersion("1.3.*")]
+[assembly: AssemblyVersion("1.5.*")]
 
 namespace pollock
 {
@@ -234,7 +234,7 @@ namespace pollock
                             lang.lcid += " " + parts[i];
                         break;
                     case 'a':
-                        // This attribue will be restored manually
+                        // This attribute will be restored manually
                         break;
                     case 'g':
                         comment = null;
@@ -266,8 +266,16 @@ namespace pollock
                         }
                         lang.sections[section_name].Add(new Message(parts[1], parts[2]));
                         // We also maintain global list of Id -> str for convenience
-                        lang.id_to_str.Add(new Id(section_name, (parts[1])), parts[2]);
-                        last_key = parts[1];
+                        try
+                        {
+                            lang.id_to_str.Add(new Id(section_name, (parts[1])), parts[2]);
+                        }
+                        catch (Exception e)
+                        {
+                            Console.WriteLine($"Error for {parts[1]}: " + e.Message);
+                            continue;
+                        }
+                            last_key = parts[1];
                         if (comment != null)
                         {
                             id = new Id(section_name, last_key);
@@ -300,7 +308,7 @@ namespace pollock
         /// <summary>
         /// Create .po/.pot files from a list of Language elements.
         /// </summary>
-        /// <param name="langs">A lits of Language objects to process.</param>
+        /// <param name="langs">A list of Language objects to process.</param>
         /// <param name="old_en_US">(Optional) A previous version of en-US to use for comparison.</param>
         /// <param name="path">(Optional) The path where the .po/.pot files should be created.</param>
         /// <returns>The number of PO files created.</returns>
@@ -418,6 +426,9 @@ namespace pollock
                         if ((old_en_US != null) && (added_ids.Contains(id) || modified_ids.Contains(id)))
                             writer.WriteLine("#, fuzzy");
                         string msg_str = lang.sections[id.group].Where(x => x.id == id.id).Select(x => x.str).FirstOrDefault();
+                        // Special case for MSG_176, which we need to replace
+                        if (id.group == "MSG" && id.id == "MSG_176")
+                            en_str = "\"English translation: Pete Batard <mailto:pete@akeo.ie>\"";
                         // Special case for MSG_240, which we missed in the last round
                         if (id.group == "MSG" && id.id == "MSG_240" && msg_str == null)
                             writer.WriteLine("#, fuzzy");
@@ -457,7 +468,7 @@ namespace pollock
             bool is_pot = file.EndsWith(".pot");
             bool file_locked = true;
             string[] lines = null;
-            // May get an I/O expection if Poedit is not done
+            // May get an I/O exception if Poedit is not done
             do
             {
                 try
@@ -924,7 +935,7 @@ namespace pollock
             // Fix needed for Windows 7 to download from github SSL
             ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
 
-            // Also set the Console width to something that can accomodate us
+            // Also set the Console width to something that can accommodate us
             if (Console.WindowWidth < 100)
                 Console.SetWindowSize(100, Console.WindowHeight);
 

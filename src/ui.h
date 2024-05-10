@@ -20,6 +20,7 @@
 #include <windows.h>
 #include <stdint.h>
 #include "resource.h"
+#include "localization.h"
 
 #pragma once
 
@@ -74,7 +75,7 @@ enum update_progress_type {
 extern HWND hMultiToolbar, hSaveToolbar, hHashToolbar, hAdvancedDeviceToolbar, hAdvancedFormatToolbar;
 extern HFONT hInfoFont;
 extern UINT_PTR UM_LANGUAGE_MENU_MAX;
-extern BOOL advanced_mode_device, advanced_mode_format, force_large_fat32, app_changed_size, windows_to_go_selected;
+extern BOOL advanced_mode_device, advanced_mode_format, force_large_fat32, app_changed_size;
 extern loc_cmd* selected_locale;
 extern uint64_t persistence_size;
 extern const char *sfd_name, *flash_type[BADLOCKS_PATTERN_TYPES];
@@ -99,6 +100,7 @@ extern void ToggleAdvancedFormatOptions(BOOL enable);
 extern void ToggleImageOptions(void);
 extern void CreateSmallButtons(HWND hDlg);
 extern void CreateAdditionalControls(HWND hDlg);
+extern void EnableControls(BOOL enable, BOOL remove_checkboxes);
 extern void InitProgress(BOOL bOnlyFormat);
 extern void ShowLanguageMenu(RECT rcExclude);
 extern void SetPassesTooltip(void);

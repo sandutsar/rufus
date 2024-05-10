@@ -6,7 +6,7 @@
  *
  * See also: https://utf8everywhere.org
  *
- * Copyright © 2010-2021 Pete Batard <pete@akeo.ie>
+ * Copyright © 2010-2023 Pete Batard <pete@akeo.ie>
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -344,19 +344,19 @@ static __inline int DrawTextU(HDC hDC, LPCSTR lpText, int nCount, LPRECT lpRect,
 static __inline int GetWindowTextU(HWND hWnd, char* lpString, int nMaxCount)
 {
 	int ret = 0;
-	DWORD err = ERROR_INVALID_DATA;
+	DWORD err = ERROR_INVALID_PARAMETER;
+	if (lpString == NULL || nMaxCount < 1)
+		goto out;
 	// Handle the empty string as GetWindowTextW() returns 0 then
-	if ((lpString != NULL) && (nMaxCount > 0))
-		lpString[0] = 0;
-	// coverity[returned_null]
+	lpString[0] = 0;
 	walloc(lpString, nMaxCount);
 	ret = GetWindowTextW(hWnd, wlpString, nMaxCount);
 	err = GetLastError();
-	// coverity[var_deref_model]
-	if ( (ret != 0) && ((ret = wchar_to_utf8_no_alloc(wlpString, lpString, nMaxCount)) == 0) ) {
+	if ((ret != 0) && ((ret = wchar_to_utf8_no_alloc(wlpString, lpString, nMaxCount)) == 0))
 		err = GetLastError();
-	}
 	wfree(lpString);
+	lpString[nMaxCount - 1] = 0;
+out:
 	SetLastError(err);
 	return ret;
 }
@@ -720,6 +720,47 @@ static __inline DWORD GetModuleFileNameExU(HANDLE hProcess, HMODULE hModule, cha
 	return ret;
 }
 
+static __inline DWORD GetFinalPathNameByHandleU(HANDLE hFile, char* lpszFilePath, DWORD cchFilePath, DWORD dwFlags)
+{
+	DWORD ret = 0, err = ERROR_INVALID_DATA;
+	walloc(lpszFilePath, cchFilePath);
+	ret = GetFinalPathNameByHandleW(hFile, wlpszFilePath, cchFilePath, dwFlags);
+	err = GetLastError();
+	if ((ret != 0)
+		&& ((ret = wchar_to_utf8_no_alloc(wlpszFilePath, lpszFilePath, cchFilePath)) == 0)) {
+		err = GetLastError();
+	}
+	wfree(lpszFilePath);
+	SetLastError(err);
+	return ret;
+}
+
+static __inline DWORD GetFileVersionInfoSizeU(const char* lpFileName, LPDWORD lpdwHandle)
+{
+	DWORD ret = 0, err = ERROR_INVALID_DATA;
+	wconvert(lpFileName);
+	ret = GetFileVersionInfoSizeW(wlpFileName, lpdwHandle);
+	err = GetLastError();
+	wfree(lpFileName);
+	SetLastError(err);
+	return ret;
+}
+
+static __inline BOOL GetFileVersionInfoU(const char* lpFileName, DWORD dwHandle, DWORD dwLen, LPVOID lpData)
+{
+	BOOL ret = FALSE;
+	DWORD err = ERROR_INVALID_DATA;
+	wconvert(lpFileName);
+	if (dwHandle != 0)
+		SetLastError(ERROR_INVALID_PARAMETER);
+	else
+		ret = GetFileVersionInfoW(wlpFileName, dwHandle, dwLen, lpData);
+	err = GetLastError();
+	wfree(lpFileName);
+	SetLastError(err);
+	return ret;
+}
+
 static __inline DWORD GetFullPathNameU(const char* lpFileName, DWORD nBufferLength, char* lpBuffer, char** lpFilePart)
 {
 	DWORD ret = 0, err = ERROR_INVALID_DATA;
@@ -795,7 +836,7 @@ static __inline int SHDeleteDirectoryExU(HWND hwnd, const char* pszPath, FILEOP_
 	int ret;
 	// String needs to be double NULL terminated, so we just use the length of the UTF-8 string
 	// which is always expected to be larger than our UTF-16 one, and add 2 chars for good measure.
-	size_t wpszPath_len = strlen(pszPath) + 2;
+	size_t wpszPath_len = (pszPath == NULL) ? 0 : strlen(pszPath) + 2;
 	// coverity[returned_null]
 	walloc(pszPath, wpszPath_len);
 	SHFILEOPSTRUCTW shfo = { hwnd, FO_DELETE, wpszPath, NULL, fFlags, FALSE, NULL, NULL };
@@ -1105,6 +1146,13 @@ static __inline const char* _filenameU(const char* path)
 	return path;
 }
 
+static __inline uint64_t _filesizeU(const char* path)
+{
+	struct __stat64 stat64 = { 0 };
+	_stat64U(path, &stat64);
+	return stat64.st_size;
+}
+
 // returned UTF-8 string must be freed
 static __inline char* getenvU(const char* varname)
 {
@@ -1192,6 +1240,16 @@ static __inline BOOL MoveFileExU(const char* lpExistingFileName, const char* lpN
 	return ret;
 }
 
+static __inline BOOL CreateSymbolicLinkU(const char* lpSymlinkFileName, const char* lpTargetFileName, DWORD dwFlags)
+{
+	wconvert(lpSymlinkFileName);
+	wconvert(lpTargetFileName);
+	BOOL ret = CreateSymbolicLinkW(wlpSymlinkFileName, wlpTargetFileName, dwFlags);
+	wfree(lpTargetFileName);
+	wfree(lpSymlinkFileName);
+	return ret;
+}
+
 // The following expects PropertyBuffer to contain a single Unicode string
 static __inline BOOL SetupDiGetDeviceRegistryPropertyU(HDEVINFO DeviceInfoSet, PSP_DEVINFO_DATA DeviceInfoData,
 	DWORD Property, PDWORD PropertyRegDataType, PBYTE PropertyBuffer, DWORD PropertyBufferSize, PDWORD RequiredSize)
@@ -1210,6 +1268,33 @@ static __inline BOOL SetupDiGetDeviceRegistryPropertyU(HDEVINFO DeviceInfoSet, P
 		ret = FALSE;
 	}
 	wfree(PropertyBuffer);
+	SetLastError(err);
+	return ret;
+}
+
+// NB: This does not support the ERROR_INSUFFICIENT_BUFFER dance to retrieve the required buffer size
+static __inline BOOL GetUserNameU(LPSTR lpBuffer, LPDWORD pcbBuffer)
+{
+	BOOL ret;
+	DWORD err, size;
+	if (lpBuffer == NULL || pcbBuffer == NULL) {
+		SetLastError(ERROR_INVALID_PARAMETER);
+		return FALSE;
+	}
+	size = *pcbBuffer;
+	// coverity[returned_null]
+	walloc(lpBuffer, size);
+	ret = GetUserNameW(wlpBuffer, &size);
+	err = GetLastError();
+	if (ret) {
+		*pcbBuffer = (DWORD)wchar_to_utf8_no_alloc(wlpBuffer, lpBuffer, size);
+		if (*pcbBuffer == 0)
+			err = GetLastError();
+		else
+			// Reported size includes the NUL terminator
+			(*pcbBuffer)++;
+	}
+	wfree(lpBuffer);
 	SetLastError(err);
 	return ret;
 }

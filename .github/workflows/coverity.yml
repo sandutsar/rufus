@@ -2,6 +2,7 @@ name: Coverity
 
 on:
   push:
+    branches: [master]
     paths-ignore:
       - '.gitignore'
       - '.gitattributes'
@@ -26,7 +27,7 @@ jobs:
 
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v2
+      uses: actions/checkout@v4
       with:
         fetch-depth: 0
         submodules: recursive
@@ -43,12 +44,21 @@ jobs:
       run: echo "${{github.workspace}}/cov-analysis-win64/bin" >> $GITHUB_PATH
 
     - name: Add MSBuild to PATH
-      uses: microsoft/setup-msbuild@v1
+      uses: microsoft/setup-msbuild@v2
 
     - name: Build with Coverity
-      run: cov-build.exe --dir cov-int msbuild ${{ env.SOLUTION_FILE_PATH }} /m /p:Configuration=${{ env.BUILD_CONFIGURATION }},Platform=${{ env.TARGET_PLATFORM }}
+      run: | 
+        cov-configure --msvc
+        cov-build.exe --dir cov-int msbuild ${{ env.SOLUTION_FILE_PATH }} /m /p:Configuration=${{ env.BUILD_CONFIGURATION }},Platform=${{ env.TARGET_PLATFORM }}
+
+    - name: Publish Coverity artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: cov-int
+        path: cov-int/
       
     - name: Upload Coverity build for analysis
       run: |
         7z a -r cov-int.zip cov-int
         curl --form email=${{ env.EMAIL }} --form token=${{ secrets.COVERITY_SCAN_TOKEN }} --form file=@cov-int.zip --form version="${{ env.GITHUB_SHA }}" --form description="Automated build" https://scan.coverity.com/builds?project=${{ env.COVERITY_PROJECT_NAME }}
+

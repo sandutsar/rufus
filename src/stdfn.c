@@ -1,7 +1,7 @@
 /*
  * Rufus: The Reliable USB Formatting Utility
  * Standard Windows function calls
- * Copyright © 2013-2021 Pete Batard <pete@akeo.ie>
+ * Copyright © 2013-2024 Pete Batard <pete@akeo.ie>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -24,7 +24,9 @@
 #include <windows.h>
 #include <sddl.h>
 #include <gpedit.h>
+#include <assert.h>
 
+#include "re.h"
 #include "rufus.h"
 #include "missing.h"
 #include "resource.h"
@@ -33,9 +35,16 @@
 
 #include "settings.h"
 
-int  nWindowsVersion = WINDOWS_UNDEFINED;
-int  nWindowsBuildNumber = -1;
-char WindowsVersionStr[128] = "Windows ";
+// MinGW doesn't yet know these (from wldp.h)
+typedef enum WLDP_WINDOWS_LOCKDOWN_MODE
+{
+	WLDP_WINDOWS_LOCKDOWN_MODE_UNLOCKED = 0,
+	WLDP_WINDOWS_LOCKDOWN_MODE_TRIAL,
+	WLDP_WINDOWS_LOCKDOWN_MODE_LOCKED,
+	WLDP_WINDOWS_LOCKDOWN_MODE_MAX,
+} WLDP_WINDOWS_LOCKDOWN_MODE, * PWLDP_WINDOWS_LOCKDOWN_MODE;
+
+windows_version_t WindowsVersion = { 0 };
 
 /*
  * Hash table functions - modified From glibc 2.3.2:
@@ -71,8 +80,9 @@ BOOL htab_create(uint32_t nel, htab_table* htab)
 	if (htab == NULL) {
 		return FALSE;
 	}
+	assert(htab->table == NULL);
 	if (htab->table != NULL) {
-		uprintf("warning: htab_create() was called with a non empty table");
+		uprintf("Warning: htab_create() was called with a non empty table");
 		return FALSE;
 	}
 
@@ -87,7 +97,7 @@ BOOL htab_create(uint32_t nel, htab_table* htab)
 	// allocate memory and zero out.
 	htab->table = (htab_entry*)calloc(htab->size + 1, sizeof(htab_entry));
 	if (htab->table == NULL) {
-		uprintf("could not allocate space for hash table\n");
+		uprintf("Could not allocate space for hash table");
 		return FALSE;
 	}
 
@@ -157,7 +167,7 @@ uint32_t htab_hash(char* str, htab_table* htab)
 			// existing hash
 			return idx;
 		}
-		// uprintf("hash collision ('%s' vs '%s')\n", str, htab->table[idx].str);
+		// uprintf("Hash collision ('%s' vs '%s')", str, htab->table[idx].str);
 
 		// Second hash function, as suggested in [Knuth]
 		hval2 = 1 + hval % (htab->size - 2);
@@ -187,72 +197,172 @@ uint32_t htab_hash(char* str, htab_table* htab)
 	// Not found => New entry
 
 	// If the table is full return an error
+	assert(htab->filled < htab->size);
 	if (htab->filled >= htab->size) {
-		uprintf("hash table is full (%d entries)", htab->size);
+		uprintf("Hash table is full (%d entries)", htab->size);
 		return 0;
 	}
 
 	safe_free(htab->table[idx].str);
 	htab->table[idx].used = hval;
-	htab->table[idx].str = (char*) malloc(safe_strlen(str)+1);
+	htab->table[idx].str = (char*) malloc(safe_strlen(str) + 1);
 	if (htab->table[idx].str == NULL) {
-		uprintf("could not duplicate string for hash table\n");
+		uprintf("Could not duplicate string for hash table");
 		return 0;
 	}
-	memcpy(htab->table[idx].str, str, safe_strlen(str)+1);
+	memcpy(htab->table[idx].str, str, safe_strlen(str) + 1);
 	++htab->filled;
 
 	return idx;
 }
 
-BOOL is_x64(void)
+static const char* GetEdition(DWORD ProductType)
 {
-	BOOL ret = FALSE;
-	PF_TYPE_DECL(WINAPI, BOOL, IsWow64Process, (HANDLE, PBOOL));
-	// Detect if we're running a 32 or 64 bit system
-	if (sizeof(uintptr_t) < 8) {
-		PF_INIT(IsWow64Process, Kernel32);
-		if (pfIsWow64Process != NULL) {
-			(*pfIsWow64Process)(GetCurrentProcess(), &ret);
-		}
-	} else {
-		ret = TRUE;
-	}
-	return ret;
-}
+	static char unknown_edition_str[64];
 
-int GetCpuArch(void)
-{
-	SYSTEM_INFO info = { 0 };
-	GetNativeSystemInfo(&info);
-	switch (info.wProcessorArchitecture) {
-	case PROCESSOR_ARCHITECTURE_AMD64:
-		return CPU_ARCH_X86_64;
-	case PROCESSOR_ARCHITECTURE_INTEL:
-		return CPU_ARCH_X86_64;
-	case PROCESSOR_ARCHITECTURE_ARM64:
-		return CPU_ARCH_ARM_64;
-	case PROCESSOR_ARCHITECTURE_ARM:
-		return CPU_ARCH_ARM_32;
+	// From: https://docs.microsoft.com/en-us/windows/win32/api/sysinfoapi/nf-sysinfoapi-getproductinfo
+	// These values can be found in the winnt.h header.
+	switch (ProductType) {
+	case 0x00000000: return "";	//  Undefined
+	case 0x00000001: return "Ultimate";
+	case 0x00000002: return "Home Basic";
+	case 0x00000003: return "Home Premium";
+	case 0x00000004: return "Enterprise";
+	case 0x00000005: return "Home Basic N";
+	case 0x00000006: return "Business";
+	case 0x00000007: return "Server Standard";
+	case 0x00000008: return "Server Datacenter";
+	case 0x00000009: return "Smallbusiness Server";
+	case 0x0000000A: return "Server Enterprise";
+	case 0x0000000B: return "Starter";
+	case 0x0000000C: return "Server Datacenter (Core)";
+	case 0x0000000D: return "Server Standard (Core)";
+	case 0x0000000E: return "Server Enterprise (Core)";
+	case 0x00000010: return "Business N";
+	case 0x00000011: return "Web Server";
+	case 0x00000012: return "HPC Edition";
+	case 0x00000013: return "Storage Server (Essentials)";
+	case 0x0000001A: return "Home Premium N";
+	case 0x0000001B: return "Enterprise N";
+	case 0x0000001C: return "Ultimate N";
+	case 0x00000022: return "Home Server";
+	case 0x00000024: return "Server Standard without Hyper-V";
+	case 0x00000025: return "Server Datacenter without Hyper-V";
+	case 0x00000026: return "Server Enterprise without Hyper-V";
+	case 0x00000027: return "Server Datacenter without Hyper-V (Core)";
+	case 0x00000028: return "Server Standard without Hyper-V (Core)";
+	case 0x00000029: return "Server Enterprise without Hyper-V (Core)";
+	case 0x0000002A: return "Hyper-V Server";
+	case 0x0000002F: return "Starter N";
+	case 0x00000030: return "Pro";
+	case 0x00000031: return "Pro N";
+	case 0x00000034: return "Server Solutions Premium";
+	case 0x00000035: return "Server Solutions Premium (Core)";
+	case 0x00000040: return "Server Hyper Core V";
+	case 0x00000042: return "Starter E";
+	case 0x00000043: return "Home Basic E";
+	case 0x00000044: return "Premium E";
+	case 0x00000045: return "Pro E";
+	case 0x00000046: return "Enterprise E";
+	case 0x00000047: return "Ultimate E";
+	case 0x00000048: return "Enterprise (Eval)";
+	case 0x0000004F: return "Server Standard (Eval)";
+	case 0x00000050: return "Server Datacenter (Eval)";
+	case 0x00000054: return "Enterprise N (Eval)";
+	case 0x00000057: return "Thin PC";
+	case 0x00000058: case 0x00000059: case 0x0000005A: case 0x0000005B: case 0x0000005C: return "Embedded";
+	case 0x00000062: return "Home N";
+	case 0x00000063: return "Home China";
+	case 0x00000064: return "Home Single Language";
+	case 0x00000065: return "Home";
+	case 0x00000067: return "Pro with Media Center";
+	case 0x00000069: case 0x0000006A: case 0x0000006B: case 0x0000006C: return "Embedded";
+	case 0x0000006F: return "Home Connected";
+	case 0x00000070: return "Pro Student";
+	case 0x00000071: return "Home Connected N";
+	case 0x00000072: return "Pro Student N";
+	case 0x00000073: return "Home Connected Single Language";
+	case 0x00000074: return "Home Connected China";
+	case 0x00000079: return "Education";
+	case 0x0000007A: return "Education N";
+	case 0x0000007D: return "Enterprise LTSB";
+	case 0x0000007E: return "Enterprise LTSB N";
+	case 0x0000007F: return "Pro S";
+	case 0x00000080: return "Pro S N";
+	case 0x00000081: return "Enterprise LTSB (Eval)";
+	case 0x00000082: return "Enterprise LTSB N (Eval)";
+	case 0x0000008A: return "Pro Single Language";
+	case 0x0000008B: return "Pro China";
+	case 0x0000008C: return "Enterprise Subscription";
+	case 0x0000008D: return "Enterprise Subscription N";
+	case 0x00000091: return "Server Datacenter SA (Core)";
+	case 0x00000092: return "Server Standard SA (Core)";
+	case 0x00000095: return "Utility VM";
+	case 0x000000A1: return "Pro for Workstations";
+	case 0x000000A2: return "Pro for Workstations N";
+	case 0x000000A4: return "Pro for Education";
+	case 0x000000A5: return "Pro for Education N";
+	case 0x000000AB: return "Enterprise G";	// I swear Microsoft are just making up editions...
+	case 0x000000AC: return "Enterprise G N";
+	case 0x000000B2: return "Cloud";
+	case 0x000000B3: return "Cloud N";
+	case 0x000000B6: return "Home OS";
+	case 0x000000B7: case 0x000000CB: return "Cloud E";
+	case 0x000000B9: return "IoT OS";
+	case 0x000000BA: case 0x000000CA: return "Cloud E N";
+	case 0x000000BB: return "IoT Edge OS";
+	case 0x000000BC: return "IoT Enterprise";
+	case 0x000000BD: return "Lite";
+	case 0x000000BF: return "IoT Enterprise S";
+	case 0x000000C0: case 0x000000C2: case 0x000000C3: case 0x000000C4: case 0x000000C5: case 0x000000C6: return "XBox";
+	case 0x000000C7: case 0x000000C8: case 0x00000196: case 0x00000197: case 0x00000198: return "Azure Server";
+	case 0xABCDABCD: return "(Unlicensed)";
 	default:
-		return CPU_ARCH_UNDEFINED;
+		static_sprintf(unknown_edition_str, "(Unknown Edition 0x%02X)", (uint32_t)ProductType);
+		return unknown_edition_str;
 	}
 }
 
-// From smartmontools os_win32.cpp
-void GetWindowsVersion(void)
+PF_TYPE_DECL(WINAPI, HRESULT, WldpQueryWindowsLockdownMode, (PWLDP_WINDOWS_LOCKDOWN_MODE));
+BOOL isSMode(void)
+{
+	BOOL r = FALSE;
+	WLDP_WINDOWS_LOCKDOWN_MODE mode;
+	PF_INIT_OR_OUT(WldpQueryWindowsLockdownMode, Wldp);
+
+	HRESULT hr = pfWldpQueryWindowsLockdownMode(&mode);
+	if (hr != S_OK) {
+		SetLastError((DWORD)hr);
+		uprintf("Could not detect S Mode: %s", WindowsErrorString());
+	} else {
+		r = (mode != WLDP_WINDOWS_LOCKDOWN_MODE_UNLOCKED);
+	}
+
+out:
+	return r;
+}
+
+/*
+ * Modified from smartmontools' os_win32.cpp
+ */
+void GetWindowsVersion(windows_version_t* windows_version)
 {
 	OSVERSIONINFOEXA vi, vi2;
-	const char* w = 0;
-	const char* w64 = "32 bit";
+	DWORD dwProductType = 0;
+	const char* w = NULL;
+	const char* arch_name;
 	char *vptr;
 	size_t vlen;
-	unsigned major, minor;
+	DWORD major = 0, minor = 0;
+	USHORT ProcessMachine = IMAGE_FILE_MACHINE_UNKNOWN, NativeMachine = IMAGE_FILE_MACHINE_UNKNOWN;
 	ULONGLONG major_equal, minor_equal;
-	BOOL ws;
+	BOOL ws, is_wow64 = FALSE;
 
-	nWindowsVersion = WINDOWS_UNDEFINED;
-	static_strcpy(WindowsVersionStr, "Windows Undefined");
+	PF_TYPE_DECL(WINAPI, BOOL, IsWow64Process2, (HANDLE, USHORT*, USHORT*));
+	PF_INIT(IsWow64Process2, Kernel32);
+
+	memset(windows_version, 0, sizeof(windows_version_t));
+	static_strcpy(windows_version->VersionStr, "Windows Undefined");
 
 	memset(&vi, 0, sizeof(vi));
 	vi.dwOSVersionInfoSize = sizeof(vi);
@@ -297,61 +407,132 @@ void GetWindowsVersion(void)
 
 		if (vi.dwMajorVersion <= 0xf && vi.dwMinorVersion <= 0xf) {
 			ws = (vi.wProductType <= VER_NT_WORKSTATION);
-			nWindowsVersion = vi.dwMajorVersion << 4 | vi.dwMinorVersion;
-			switch (nWindowsVersion) {
-			case 0x51: w = "XP";
+			windows_version->Version = vi.dwMajorVersion << 4 | vi.dwMinorVersion;
+			switch (windows_version->Version) {
+			case WINDOWS_XP: w = "XP";
 				break;
-			case 0x52: w = (!GetSystemMetrics(89)?"Server 2003":"Server 2003_R2");
+			case WINDOWS_2003: w = (ws ? "XP_64" : (!GetSystemMetrics(89) ? "Server 2003" : "Server 2003_R2"));
 				break;
-			case 0x60: w = (ws?"Vista":"Server 2008");
+			case WINDOWS_VISTA: w = (ws ? "Vista" : "Server 2008");
 				break;
-			case 0x61: w = (ws?"7":"Server 2008_R2");
+			case WINDOWS_7: w = (ws ? "7" : "Server 2008_R2");
 				break;
-			case 0x62: w = (ws?"8":"Server 2012");
+			case WINDOWS_8: w = (ws ? "8" : "Server 2012");
 				break;
-			case 0x63: w = (ws?"8.1":"Server 2012_R2");
+			case WINDOWS_8_1: w = (ws ? "8.1" : "Server 2012_R2");
 				break;
-			case 0x64: w = (ws?"10 (Preview 1)":"Server 10 (Preview 1)");
+			case WINDOWS_10_PREVIEW1: w = (ws ? "10 (Preview 1)" : "Server 10 (Preview 1)");
 				break;
 			// Starting with Windows 10 Preview 2, the major is the same as the public-facing version
-			case 0xA0: w = (ws?"10":"Server 2016");
+			case WINDOWS_10:
+				if (vi.dwBuildNumber < 20000) {
+					w = (ws ? "10" : ((vi.dwBuildNumber < 17763) ? "Server 2016" : "Server 2019"));
+					break;
+				}
+				windows_version->Version = WINDOWS_11;
+				major = 11;
+				// Fall through
+			case WINDOWS_11: w = (ws ? "11" : "Server 2022");
 				break;
 			default:
-				if (nWindowsVersion < 0x51)
-					nWindowsVersion = WINDOWS_UNSUPPORTED;
+				if (windows_version->Version < WINDOWS_XP)
+					windows_version->Version = WINDOWS_UNDEFINED;
 				else
-					w = "11 or later";
+					w = "12 or later";
 				break;
 			}
 		}
 	}
+	windows_version->Major = major;
+	windows_version->Minor = minor;
 
-	if (is_x64())
-		w64 = "64-bit";
-
-	vptr = &WindowsVersionStr[sizeof("Windows ") - 1];
-	vlen = sizeof(WindowsVersionStr) - sizeof("Windows ") - 1;
-	if (!w)
-		safe_sprintf(vptr, vlen, "%s %u.%u %s", (vi.dwPlatformId==VER_PLATFORM_WIN32_NT?"NT":"??"),
-			(unsigned)vi.dwMajorVersion, (unsigned)vi.dwMinorVersion, w64);
-	else if (vi.wServicePackMinor)
-		safe_sprintf(vptr, vlen, "%s SP%u.%u %s", w, vi.wServicePackMajor, vi.wServicePackMinor, w64);
-	else if (vi.wServicePackMajor)
-		safe_sprintf(vptr, vlen, "%s SP%u %s", w, vi.wServicePackMajor, w64);
-	else
-		safe_sprintf(vptr, vlen, "%s %s", w, w64);
-
-	// Add the build number (including UBR if available) for Windows 8.0 and later
-	nWindowsBuildNumber = vi.dwBuildNumber;
-	if (nWindowsVersion >= 0x62) {
-		int nUbr = ReadRegistryKey32(REGKEY_HKLM, "Software\\Microsoft\\Windows NT\\CurrentVersion\\UBR");
-		vptr = &WindowsVersionStr[safe_strlen(WindowsVersionStr)];
-		vlen = sizeof(WindowsVersionStr) - safe_strlen(WindowsVersionStr) - 1;
-		if (nUbr > 0)
-			safe_sprintf(vptr, vlen, " (Build %d.%d)", nWindowsBuildNumber, nUbr);
-		else
-			safe_sprintf(vptr, vlen, " (Build %d)", nWindowsBuildNumber);
+	if ((pfIsWow64Process2 != NULL) && pfIsWow64Process2(GetCurrentProcess(), &ProcessMachine, &NativeMachine)) {
+		windows_version->Arch = NativeMachine;
+	} else {
+		// Assume same arch as the app
+		windows_version->Arch = GetApplicationArch();
+		// Fix the Arch if we have a 32-bit app running under WOW64
+		if ((sizeof(uintptr_t) < 8) && IsWow64Process(GetCurrentProcess(), &is_wow64) && is_wow64) {
+			if (windows_version->Arch == IMAGE_FILE_MACHINE_I386)
+				windows_version->Arch = IMAGE_FILE_MACHINE_AMD64;
+			else if (windows_version->Arch == IMAGE_FILE_MACHINE_ARM)
+				windows_version->Arch = IMAGE_FILE_MACHINE_ARM64;
+			else // I sure wanna be made aware of this scenario...
+				assert(FALSE);
+		}
+		uprintf("Note: Underlying Windows architecture was guessed and may be incorrect...");
 	}
+	arch_name = GetArchName(windows_version->Arch);
+
+	GetProductInfo(vi.dwMajorVersion, vi.dwMinorVersion, vi.wServicePackMajor, vi.wServicePackMinor, &dwProductType);
+	vptr = &windows_version->VersionStr[sizeof("Windows ") - 1];
+	vlen = sizeof(windows_version->VersionStr) - sizeof("Windows ") - 1;
+	if (!w)
+		safe_sprintf(vptr, vlen, "%s %u.%u %s", (vi.dwPlatformId == VER_PLATFORM_WIN32_NT ? "NT" : "??"),
+			(unsigned)vi.dwMajorVersion, (unsigned)vi.dwMinorVersion, arch_name);
+	else if (vi.wServicePackMinor)
+		safe_sprintf(vptr, vlen, "%s SP%u.%u %s", w, vi.wServicePackMajor, vi.wServicePackMinor, arch_name);
+	else if (vi.wServicePackMajor)
+		safe_sprintf(vptr, vlen, "%s SP%u %s", w, vi.wServicePackMajor, arch_name);
+	else
+		safe_sprintf(vptr, vlen, "%s%s%s %s",
+			w, (dwProductType != 0) ? " " : "", GetEdition(dwProductType), arch_name);
+
+	windows_version->Edition = (int)dwProductType;
+
+	// Add the build number (including UBR if available)
+	windows_version->BuildNumber = vi.dwBuildNumber;
+	windows_version->Ubr = ReadRegistryKey32(REGKEY_HKLM, "Software\\Microsoft\\Windows NT\\CurrentVersion\\UBR");
+	vptr = &windows_version->VersionStr[safe_strlen(windows_version->VersionStr)];
+	vlen = sizeof(windows_version->VersionStr) - safe_strlen(windows_version->VersionStr) - 1;
+	if (windows_version->Ubr != 0)
+		safe_sprintf(vptr, vlen, " (Build %lu.%lu)", windows_version->BuildNumber, windows_version->Ubr);
+	else
+		safe_sprintf(vptr, vlen, " (Build %lu)", windows_version->BuildNumber);
+	vptr = &windows_version->VersionStr[safe_strlen(windows_version->VersionStr)];
+	vlen = sizeof(windows_version->VersionStr) - safe_strlen(windows_version->VersionStr) - 1;
+	if (isSMode())
+		safe_sprintf(vptr, vlen, " in S Mode");
+}
+
+/*
+ * Why oh why does Microsoft make it so convoluted to retrieve a measly executable's version number ?
+ */
+version_t* GetExecutableVersion(const char* path)
+{
+	static version_t version, *r = NULL;
+	uint8_t* buf = NULL;
+	UINT uLen;
+	DWORD dwSize, dwHandle;
+	VS_FIXEDFILEINFO* version_info;
+
+	memset(&version, 0, sizeof(version));
+
+	dwSize = GetFileVersionInfoSizeU(path, &dwHandle);
+	if (dwSize == 0)
+		goto out;
+
+	buf = malloc(dwSize);
+	if (buf == NULL)
+		goto out;;
+	if (!GetFileVersionInfoU(path, dwHandle, dwSize, buf))
+		goto out;
+
+	if (!VerQueryValueA(buf, "\\", (LPVOID*)&version_info, &uLen) || uLen == 0)
+		goto out;
+
+	if (version_info->dwSignature != 0xfeef04bd)
+		goto out;
+
+	version.Major = (version_info->dwFileVersionMS >> 16) & 0xffff;
+	version.Minor = (version_info->dwFileVersionMS >> 0) & 0xffff;
+	version.Micro = (version_info->dwFileVersionLS >> 16) & 0xffff;
+	version.Nano = (version_info->dwFileVersionLS >> 0) & 0xffff;
+	r = &version;
+
+out:
+	free(buf);
+	return r;
 }
 
 /*
@@ -363,7 +544,7 @@ void StrArrayCreate(StrArray* arr, uint32_t initial_size)
 	arr->Max = initial_size; arr->Index = 0;
 	arr->String = (char**)calloc(arr->Max, sizeof(char*));
 	if (arr->String == NULL)
-		uprintf("Could not allocate string array\n");
+		uprintf("Could not allocate string array");
 }
 
 int32_t StrArrayAdd(StrArray* arr, const char* str, BOOL duplicate)
@@ -377,13 +558,13 @@ int32_t StrArrayAdd(StrArray* arr, const char* str, BOOL duplicate)
 		arr->String = (char**)realloc(arr->String, arr->Max*sizeof(char*));
 		if (arr->String == NULL) {
 			free(old_table);
-			uprintf("Could not reallocate string array\n");
+			uprintf("Could not reallocate string array");
 			return -1;
 		}
 	}
 	arr->String[arr->Index] = (duplicate)?safe_strdup(str):(char*)str;
 	if (arr->String[arr->Index] == NULL) {
-		uprintf("Could not store string in array\n");
+		uprintf("Could not store string in array");
 		return -1;
 	}
 	return arr->Index++;
@@ -406,7 +587,7 @@ void StrArrayClear(StrArray* arr)
 	uint32_t i;
 	if ((arr == NULL) || (arr->String == NULL))
 		return;
-	for (i=0; i<arr->Index; i++) {
+	for (i = 0; i < arr->Index; i++) {
 		safe_free(arr->String[i]);
 	}
 	arr->Index = 0;
@@ -430,13 +611,13 @@ static PSID GetSID(void) {
 	char* psid_string = NULL;
 
 	if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) {
-		uprintf("OpenProcessToken failed: %s\n", WindowsErrorString());
+		uprintf("OpenProcessToken failed: %s", WindowsErrorString());
 		return NULL;
 	}
 
 	if (!GetTokenInformation(token, TokenUser, tu, 0, &len)) {
 		if (GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
-			uprintf("GetTokenInformation (pre) failed: %s\n", WindowsErrorString());
+			uprintf("GetTokenInformation (pre) failed: %s", WindowsErrorString());
 			return NULL;
 		}
 		tu = (TOKEN_USER*)calloc(1, len);
@@ -452,11 +633,11 @@ static PSID GetSID(void) {
 		 * The workaround? Convert to string then back to PSID
 		 */
 		if (!ConvertSidToStringSidA(tu->User.Sid, &psid_string)) {
-			uprintf("Unable to convert SID to string: %s\n", WindowsErrorString());
+			uprintf("Unable to convert SID to string: %s", WindowsErrorString());
 			ret = NULL;
 		} else {
 			if (!ConvertStringSidToSidA(psid_string, &ret)) {
-				uprintf("Unable to convert string back to SID: %s\n", WindowsErrorString());
+				uprintf("Unable to convert string back to SID: %s", WindowsErrorString());
 				ret = NULL;
 			}
 			// MUST use LocalFree()
@@ -464,23 +645,21 @@ static PSID GetSID(void) {
 		}
 	} else {
 		ret = NULL;
-		uprintf("GetTokenInformation (real) failed: %s\n", WindowsErrorString());
+		uprintf("GetTokenInformation (real) failed: %s", WindowsErrorString());
 	}
 	free(tu);
 	return ret;
 }
 
-/*
- * read or write I/O to a file
- * buffer is allocated by the procedure. path is UTF-8
- */
-BOOL FileIO(BOOL save, char* path, char** buffer, DWORD* size)
+BOOL FileIO(enum file_io_type io_type, char* path, char** buffer, DWORD* size)
 {
 	SECURITY_ATTRIBUTES s_attr, *sa = NULL;
 	SECURITY_DESCRIPTOR s_desc;
+	const LARGE_INTEGER liZero = { .QuadPart = 0ULL };
 	PSID sid = NULL;
 	HANDLE handle;
-	BOOL r;
+	DWORD dwDesiredAccess = 0, dwCreationDisposition = 0;
+	BOOL r = FALSE;
 	BOOL ret = FALSE;
 
 	// Change the owner from admin to regular user
@@ -493,48 +672,67 @@ BOOL FileIO(BOOL save, char* path, char** buffer, DWORD* size)
 		s_attr.lpSecurityDescriptor = &s_desc;
 		sa = &s_attr;
 	} else {
-		uprintf("Could not set security descriptor: %s\n", WindowsErrorString());
+		uprintf("Could not set security descriptor: %s", WindowsErrorString());
 	}
 
-	if (!save) {
+	switch (io_type) {
+	case FILE_IO_READ:
 		*buffer = NULL;
+		dwDesiredAccess = GENERIC_READ;
+		dwCreationDisposition = OPEN_EXISTING;
+		break;
+	case FILE_IO_WRITE:
+		dwDesiredAccess = GENERIC_WRITE;
+		dwCreationDisposition = CREATE_ALWAYS;
+		break;
+	case FILE_IO_APPEND:
+		dwDesiredAccess = FILE_APPEND_DATA;
+		dwCreationDisposition = OPEN_ALWAYS;
+		break;
+	default:
+		assert(FALSE);
+		break;
 	}
-	handle = CreateFileU(path, save?GENERIC_WRITE:GENERIC_READ, FILE_SHARE_READ,
-		sa, save?CREATE_ALWAYS:OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+	handle = CreateFileU(path, dwDesiredAccess, FILE_SHARE_READ, sa,
+		dwCreationDisposition, FILE_ATTRIBUTE_NORMAL, NULL);
 
 	if (handle == INVALID_HANDLE_VALUE) {
-		uprintf("Could not %s file '%s'\n", save?"create":"open", path);
+		uprintf("Could not open '%s': %s", path, WindowsErrorString());
 		goto out;
 	}
 
-	if (save) {
-		r = WriteFile(handle, *buffer, *size, size, NULL);
-	} else {
+	switch (io_type) {
+	case FILE_IO_READ:
 		*size = GetFileSize(handle, NULL);
 		*buffer = (char*)malloc(*size);
 		if (*buffer == NULL) {
-			uprintf("Could not allocate buffer for reading file\n");
+			uprintf("Could not allocate buffer for reading file");
 			goto out;
 		}
 		r = ReadFile(handle, *buffer, *size, size, NULL);
+		break;
+	case FILE_IO_APPEND:
+		SetFilePointerEx(handle, liZero, NULL, FILE_END);
+		// Fall through
+	case FILE_IO_WRITE:
+		r = WriteFile(handle, *buffer, *size, size, NULL);
+		break;
 	}
 
 	if (!r) {
-		uprintf("I/O Error: %s\n", WindowsErrorString());
+		uprintf("I/O Error: %s", WindowsErrorString());
 		goto out;
 	}
 
-	PrintInfoDebug(0, save?MSG_216:MSG_215, path);
+	PrintInfoDebug(0, (io_type == FILE_IO_READ) ? MSG_215 : MSG_216, path);
 	ret = TRUE;
 
 out:
 	CloseHandle(handle);
-	if (!ret) {
-		// Only leave a buffer allocated if successful
+	if (!ret && (io_type == FILE_IO_READ)) {
+		// Only leave the buffer allocated if we were able to read data
+		safe_free(*buffer);
 		*size = 0;
-		if (!save) {
-			safe_free(*buffer);
-		}
 	}
 	return ret;
 }
@@ -545,21 +743,21 @@ out:
  * size is allocated for the resource. Else the buffer is allocate for
  * the resource size.
  */
-unsigned char* GetResource(HMODULE module, char* name, char* type, const char* desc, DWORD* len, BOOL duplicate)
+uint8_t* GetResource(HMODULE module, char* name, char* type, const char* desc, DWORD* len, BOOL duplicate)
 {
 	HGLOBAL res_handle;
 	HRSRC res;
 	DWORD res_len;
-	unsigned char* p = NULL;
+	uint8_t* p = NULL;
 
 	res = FindResourceA(module, name, type);
 	if (res == NULL) {
-		uprintf("Could not locate resource '%s': %s\n", desc, WindowsErrorString());
+		uprintf("Could not locate resource '%s': %s", desc, WindowsErrorString());
 		goto out;
 	}
 	res_handle = LoadResource(module, res);
 	if (res_handle == NULL) {
-		uprintf("Could not load resource '%s': %s\n", desc, WindowsErrorString());
+		uprintf("Could not load resource '%s': %s", desc, WindowsErrorString());
 		goto out;
 	}
 	res_len = SizeofResource(module, res);
@@ -567,16 +765,16 @@ unsigned char* GetResource(HMODULE module, char* name, char* type, const char* d
 	if (duplicate) {
 		if (*len == 0)
 			*len = res_len;
-		p = (unsigned char*)calloc(*len, 1);
+		p = calloc(*len, 1);
 		if (p == NULL) {
-			uprintf("Could not allocate resource '%s'\n", desc);
+			uprintf("Could not allocate resource '%s'", desc);
 			goto out;
 		}
 		memcpy(p, LockResource(res_handle), min(res_len, *len));
 		if (res_len > *len)
-			uprintf("WARNING: Resource '%s' was truncated by %d bytes!\n", desc, res_len - *len);
+			uprintf("WARNING: Resource '%s' was truncated by %d bytes!", desc, res_len - *len);
 	} else {
-		p = (unsigned char*)LockResource(res_handle);
+		p = LockResource(res_handle);
 	}
 	*len = res_len;
 
@@ -591,14 +789,19 @@ DWORD GetResourceSize(HMODULE module, char* name, char* type, const char* desc)
 }
 
 // Run a console command, with optional redirection of stdout and stderr to our log
-DWORD RunCommand(const char* cmd, const char* dir, BOOL log)
+// as well as optional progress reporting if msg is not 0.
+DWORD RunCommandWithProgress(const char* cmd, const char* dir, BOOL log, int msg)
 {
-	DWORD ret, dwRead, dwAvail, dwPipeSize = 4096;
-	STARTUPINFOA si = {0};
-	PROCESS_INFORMATION pi = {0};
+	DWORD i, ret, dwRead, dwAvail, dwPipeSize = 4096;
+	STARTUPINFOA si = { 0 };
+	PROCESS_INFORMATION pi = { 0 };
 	SECURITY_ATTRIBUTES sa = { sizeof(SECURITY_ATTRIBUTES), NULL, TRUE };
 	HANDLE hOutputRead = INVALID_HANDLE_VALUE, hOutputWrite = INVALID_HANDLE_VALUE;
+	int match_length;
 	static char* output;
+	// For detecting typical dism.exe commandline progress report of type:
+	// "\r[====                       8.0%                           ]\r\n"
+	re_t pattern = re_compile("\\s*\\[[= ]+[\\d\\.]+%[= ]+\\]\\s*");
 
 	si.cb = sizeof(si);
 	if (log) {
@@ -622,16 +825,56 @@ DWORD RunCommand(const char* cmd, const char* dir, BOOL log)
 		goto out;
 	}
 
-	if (log) {
+	if (log || msg != 0) {
+		if (msg != 0)
+			UpdateProgressWithInfoInit(NULL, FALSE);
 		while (1) {
+			// Check for user cancel
+			if (IS_ERROR(ErrorStatus) && (SCODE_CODE(ErrorStatus) == ERROR_CANCELLED)) {
+				if (!TerminateProcess(pi.hProcess, ERROR_CANCELLED)) {
+					uprintf("Could not terminate command: %s", WindowsErrorString());
+				} else switch (WaitForSingleObject(pi.hProcess, 5000)) {
+				case WAIT_TIMEOUT:
+					uprintf("Command did not terminate within timeout duration");
+					break;
+				case WAIT_OBJECT_0:
+					uprintf("Command was terminated by user");
+					break;
+				default:
+					uprintf("Error while waiting for command to be terminated: %s", WindowsErrorString());
+					break;
+				}
+				ret = ERROR_CANCELLED;
+				goto out;
+			}
 			// coverity[string_null]
 			if (PeekNamedPipe(hOutputRead, NULL, dwPipeSize, NULL, &dwAvail, NULL)) {
 				if (dwAvail != 0) {
 					output = malloc(dwAvail + 1);
 					if ((output != NULL) && (ReadFile(hOutputRead, output, dwAvail, &dwRead, NULL)) && (dwRead != 0)) {
 						output[dwAvail] = 0;
-						// coverity[tainted_string]
-						uprintf(output);
+						// Process a commandline progress bar into a percentage
+						if ((msg != 0) && (re_matchp(pattern, output, &match_length) != -1)) {
+							float f = 0.0f;
+							i = 0;
+next_progress_line:
+							for (; (i < dwAvail) && (output[i] < '0' || output[i] > '9'); i++);
+							IGNORE_RETVAL(sscanf(&output[i], "%f*", &f));
+							UpdateProgressWithInfo(OP_FORMAT, msg, (uint64_t)(f * 100.0f), 100 * 100ULL);
+							// Go to next line
+							while ((++i < dwAvail) && (output[i] != '\n') && (output[i] != '\r'));
+							while ((++i < dwAvail) && ((output[i] == '\n') || (output[i] == '\r')));
+							// Print additional lines, if any
+							if (i < dwAvail) {
+								// Might have two consecutive progress lines in our buffer
+								if (re_matchp(pattern, &output[i], &match_length) != -1)
+									goto next_progress_line;
+								uprintf("%s", &output[i]);
+							}
+						} else if (log) {
+							// output may contain a '%' so don't feed it as a naked format string
+							uprintf("%s", output);
+						}
 					}
 					free(output);
 				}
@@ -641,6 +884,7 @@ DWORD RunCommand(const char* cmd, const char* dir, BOOL log)
 			Sleep(100);
 		};
 	} else {
+		// TODO: Detect user cancellation here?
 		WaitForSingleObject(pi.hProcess, INFINITE);
 	}
 
@@ -902,15 +1146,99 @@ out:
 	return r;
 }
 
-char* GetCurrentMUI(void)
+char* ToLocaleName(DWORD lang_id)
 {
 	static char mui_str[LOCALE_NAME_MAX_LENGTH];
 	wchar_t wmui_str[LOCALE_NAME_MAX_LENGTH];
 
-	if (LCIDToLocaleName(GetUserDefaultUILanguage(), wmui_str, LOCALE_NAME_MAX_LENGTH, 0) > 0) {
+	if (LCIDToLocaleName(lang_id, wmui_str, LOCALE_NAME_MAX_LENGTH, 0) > 0) {
 		wchar_to_utf8_no_alloc(wmui_str, mui_str, LOCALE_NAME_MAX_LENGTH);
 	} else {
 		static_strcpy(mui_str, "en-US");
 	}
 	return mui_str;
+}
+
+/*
+ * From: https://stackoverflow.com/a/40390858/1069307
+ */
+BOOL SetPrivilege(HANDLE hToken, LPCWSTR pwzPrivilegeName, BOOL bEnable)
+{
+	TOKEN_PRIVILEGES tp;
+	LUID luid;
+
+	if (!LookupPrivilegeValue(NULL, pwzPrivilegeName, &luid)) {
+		uprintf("Could not lookup '%S' privilege: %s", pwzPrivilegeName, WindowsErrorString());
+		return FALSE;
+	}
+
+	tp.PrivilegeCount = 1;
+	tp.Privileges[0].Luid = luid;
+	tp.Privileges[0].Attributes = bEnable ? SE_PRIVILEGE_ENABLED : 0;
+
+	if (!AdjustTokenPrivileges(hToken, FALSE, &tp, sizeof(TOKEN_PRIVILEGES), NULL, NULL)) {
+		uprintf("Could not %s '%S' privilege: %s",
+			bEnable ? "enable" : "disable", pwzPrivilegeName, WindowsErrorString());
+		return FALSE;
+	}
+
+	if (GetLastError() == ERROR_NOT_ALL_ASSIGNED) {
+		uprintf("Error assigning privileges: %s", WindowsErrorString());
+		return FALSE;
+	}
+
+	return TRUE;
+}
+
+/*
+ * Mount an offline registry hive located at <pszHivePath> into <key>\<pszHiveName>.
+ * <key> should be HKEY_LOCAL_MACHINE or HKEY_USERS.
+ */
+BOOL MountRegistryHive(const HKEY key, const char* pszHiveName, const char* pszHivePath)
+{
+	LSTATUS status;
+	HANDLE token = INVALID_HANDLE_VALUE;
+
+	assert((key == HKEY_LOCAL_MACHINE) || (key == HKEY_USERS));
+
+	if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES, &token)) {
+		uprintf("Could not get current process token: %s", WindowsErrorString());
+		return FALSE;
+	}
+
+	// Ignore errors on those in case we can proceed without...
+	SetPrivilege(token, SE_RESTORE_NAME, TRUE);
+	SetPrivilege(token, SE_BACKUP_NAME, TRUE);
+
+	status = RegLoadKeyA(key, pszHiveName, pszHivePath);
+	if (status != ERROR_SUCCESS) {
+		SetLastError(status);
+		uprintf("Could not mount offline registry hive '%s': %s", pszHivePath, WindowsErrorString());
+	} else
+		uprintf("Mounted offline registry hive '%s' to '%s\\%s'",
+			pszHivePath, (key == HKEY_LOCAL_MACHINE) ? "HKLM" : "HKCU", pszHiveName);
+
+	safe_closehandle(token);
+	return (status == ERROR_SUCCESS);
+}
+
+/*
+ * Unmount an offline registry hive.
+ * <key> should be HKEY_LOCAL_MACHINE or HKEY_USERS.
+ */
+BOOL UnmountRegistryHive(const HKEY key, const char* pszHiveName)
+{
+	LSTATUS status;
+
+	assert((key == HKEY_LOCAL_MACHINE) || (key == HKEY_USERS));
+
+	status = RegUnLoadKeyA(key, pszHiveName);
+	if (status != ERROR_SUCCESS) {
+		SetLastError(status);
+		uprintf("Could not unmount offline registry hive: %s", WindowsErrorString());
+	} else
+		uprintf("Unmounted offline registry hive '%s\\%s'",
+			(key == HKEY_LOCAL_MACHINE) ? "HKLM" : "HKCU", pszHiveName);
+
+	return (status == ERROR_SUCCESS);
 }

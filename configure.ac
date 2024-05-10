@@ -1,4 +1,4 @@
-AC_INIT([rufus], [3.16], [https://github.com/pbatard/rufus/issues], [rufus], [https://rufus.ie])
+AC_INIT([rufus], [4.5], [https://github.com/pbatard/rufus/issues], [rufus], [https://rufus.ie])
 AM_INIT_AUTOMAKE([-Wno-portability foreign no-dist no-dependencies])
 AC_CONFIG_SRCDIR([src/rufus.c])
 AC_CONFIG_MACRO_DIR([m4])
@@ -12,8 +12,9 @@ AC_PROG_AR
 AC_PROG_RANLIB
 AC_PROG_SED
 AC_PATH_PROG(RM, rm, rm)
-AC_CHECK_TOOL(STRIP, strip, strip)
-AC_CHECK_TOOL(WINDRES, windres, windres)
+AC_CHECK_TOOL(DLLTOOL, dlltool, :)
+AC_CHECK_TOOL(STRIP, strip, :)
+AC_CHECK_TOOL(WINDRES, windres, :)
 AC_C_INLINE
 AC_DEFINE([_GNU_SOURCE], [], [Use GNU extensions])
 
@@ -63,7 +64,7 @@ AC_COMPILE_IFELSE([AC_LANG_PROGRAM([])],
 	[nopointersign_cflags="-Wno-pointer-sign"], [nopointersign_cflags=""])
 CFLAGS="${saved_CFLAGS}"
 
-AM_CFLAGS="$AM_CFLAGS -DUNICODE -D_UNICODE -UNDEBUG -DCOBJMACROS -D__USE_MINGW_ANSI_STDIO=0 -std=gnu99 -Wshadow -Wall -Wformat-security -Wundef -Wunused -Wstrict-prototypes -Wno-restrict -Werror-implicit-function-declaration $nopointersign_cflags"
+AM_CFLAGS="$AM_CFLAGS -DUNICODE -D_UNICODE -UNDEBUG -DCOBJMACROS -D__USE_MINGW_ANSI_STDIO=0 -std=gnu99 -Wshadow -Wall -Wformat-security -Wundef -Wunused -Wstrict-prototypes -Wno-restrict -Wno-array-bounds -Werror-implicit-function-declaration -Wbidi-chars=none $nopointersign_cflags"
 
 AC_SUBST([VISIBILITY_CFLAGS])
 AC_SUBST([AM_CFLAGS])
@@ -71,6 +72,7 @@ AC_SUBST([AM_LDFLAGS])
 AC_SUBST([SUFFIX])
 
 AC_CONFIG_FILES([Makefile])
+AC_CONFIG_FILES([.mingw/Makefile])
 AC_CONFIG_FILES([src/Makefile])
 AC_CONFIG_FILES([src/bled/Makefile])
 AC_CONFIG_FILES([src/ext2fs/Makefile])
